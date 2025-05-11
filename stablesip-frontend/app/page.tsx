@@ -4,6 +4,7 @@ import { ethers } from "ethers";
 import Web3Modal from "web3modal";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import axios from 'axios';
+import { format } from "path";
 
 export default function Home() {
   const [account, setAccount] = useState("");
@@ -13,14 +14,20 @@ export default function Home() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [investmentAmount, setInvestmentAmount] = useState("");
   const [isSubscribing, setIsSubscribing] = useState(false);
-  const [privateKey, setPrivateKey] = useState("");
   const [isClaiming, setIsClaiming] = useState(false); // Add claiming state
   const [ethPriceData, setEthPriceData] = useState([]);
   const [sspyBalanceData, setSspyBalanceData] = useState([]);
+  const [isSubscribed, setIsSubscribed] = useState(false); // New state for subscription status
 
   const USDC_ADDRESS = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
   const SPY_ADDRESS = "0x7C67Fd632bbF82f5eFfE91904e9bA20929ae4dfF";
-  
+  const SIP_MANAGER_ADDRESS = "0x543DA7DC8aAD790Bbc15bdE915351790c18B1AA4";
+
+  const SIP_ABI = [
+    "function subscribe(uint256 amount) external",
+    "function claimTokens() external"
+  ];
+
   const TOKEN_ABI = [
     "function balanceOf(address) view returns (uint256)",
     "function decimals() view returns (uint8)"
@@ -78,6 +85,28 @@ export default function Home() {
       setIsConnecting(false);
     }
   };
+
+  const fetchBalances = async (provider, address) => {
+    try {
+      // Fetch ETH balance
+      const ethBalance = await provider.getBalance(address);
+      setBalance(parseFloat(ethers.formatEther(ethBalance)));
+
+      // Fetch USDC balance
+      const usdcContract = new ethers.Contract(USDC_ADDRESS, TOKEN_ABI, provider);
+      const usdcDecimals = await usdcContract.decimals();
+      const usdcBalance = await usdcContract.balanceOf(address);
+      setUsdcBalance(parseFloat(ethers.formatUnits(usdcBalance, usdcDecimals)));
+
+      // Fetch SPY balance
+      const spyContract = new ethers.Contract(SPY_ADDRESS, TOKEN_ABI, provider);
+      const spyBalance = await spyContract.balanceOf(address);
+      setSpyBalance(parseFloat(ethers.formatEther(spyBalance)));
+    } catch (error) {
+      console.error("Error fetching balances:", error);
+    }
+  };
+
   useEffect(() => {
     const fetchSSPYHistory = async () => {
       if (!account) return;
@@ -89,20 +118,25 @@ export default function Home() {
         );
   
         let balance = 0;
-        const balanceHistory = response.data.result.map(tx => {
-          // Convert tokenDecimal to number and handle potential string values
+        const dailyBalances = new Map();
+  
+        response.data.result.forEach(tx => {
           const decimals = parseInt(tx.tokenDecimal, 10);
           const value = parseFloat(ethers.formatUnits(tx.value, decimals));
-          
-          // Improved direction check
           const isIncoming = tx.to.toLowerCase() === account.toLowerCase();
           balance += isIncoming ? value : -value;
   
-          return {
-            time: new Date(parseInt(tx.timeStamp) * 1000).toLocaleDateString(),
-            balance: balance.toFixed(4),
-          };
+          const date = new Date(parseInt(tx.timeStamp) * 1000);
+          const dateKey = date.toLocaleDateString();
+          // Store the latest balance for each day
+          dailyBalances.set(dateKey, balance);
         });
+  
+        // Convert map to sorted array
+        const balanceHistory = Array.from(dailyBalances, ([time, balance]) => ({
+          time: new Date(time).toLocaleDateString(),
+          balance: Number(balance.toFixed(4))
+        })).sort((a, b) => new Date(a.time) - new Date(b.time));
   
         setSspyBalanceData(balanceHistory);
       } catch (error) {
@@ -114,43 +148,40 @@ export default function Home() {
   }, [account, spyBalance]);
 
   const handleSubscribe = async () => {
-    if (!account || !investmentAmount || !privateKey) {
-      alert("All fields required!");
+    if (!account || !investmentAmount) {
+      alert("Please connect your wallet and enter an investment amount.");
       return;
     }
 
     setIsSubscribing(true);
     try {
-      const response = await fetch('http://localhost:8000/api/subscribe/', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json'  // REMOVED INCORRECT CORS HEADER
-        },
-        body: JSON.stringify({
-          amount: parseInt(investmentAmount),
-          address: account,
-          privateKey: privateKey
-        })
-      });
+      const web3Modal = new Web3Modal({ cacheProvider: true });
+      const instance = await web3Modal.connect();
+      const provider = new ethers.BrowserProvider(instance);
+      const signer = await provider.getSigner();
 
-      // Add proper response handling
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Request failed');
-      }
+      const usdcContract = new ethers.Contract(
+        USDC_ADDRESS,
+        ["function approve(address spender, uint256 amount) public returns (bool)"],
+        signer
+      );
 
-      const data = await response.json();
-      
-      if (data.status === 'success') {
-        alert("Subscribed successfully!");
-        // Consider adding balance refresh here
-      } else {
-        alert(`Failed: ${data.message}`);
-      }
-      
+      const amountInWei = ethers.parseUnits(investmentAmount, 6); // USDC has 6 decimals
+      const approvalTx = await usdcContract.approve(SIP_MANAGER_ADDRESS, amountInWei);
+      await approvalTx.wait();
+
+      const sipContract = new ethers.Contract(SIP_MANAGER_ADDRESS, SIP_ABI, signer);
+      const subscribeTx = await sipContract.subscribe(amountInWei);
+      await subscribeTx.wait();
+
+      alert("Successfully subscribed to SIP!");
+
+      setIsSubscribed(true); // Update subscription status
+
+      await fetchBalances(provider, account);
     } catch (error) {
-      console.error("Error:", error);
-      alert(error.message || "Subscription failed");
+      console.error("Error subscribing to SIP:", error);
+      alert("Subscription failed. See console for details.");
     } finally {
       setIsSubscribing(false);
     }
@@ -158,41 +189,65 @@ export default function Home() {
 
   // Add claim tokens handler
   const handleClaim = async () => {
-    if (!account || !privateKey) {
-      alert("Pro fields required!");
+    if (!account) {
+      alert("Please connect wallet!");
       return;
     }
 
     setIsClaiming(true);
     try {
-      const response = await fetch('http://localhost:8000/api/claim/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          address: account,
-          privateKey: privateKey
-        })
+      const web3Modal = new Web3Modal({ cacheProvider: true });
+      const instance = await web3Modal.connect();
+      const provider = new ethers.BrowserProvider(instance);
+      const signer = await provider.getSigner();
+
+      const sipContract = new ethers.Contract(SIP_MANAGER_ADDRESS, SIP_ABI, signer);
+      
+      // Execute claim
+      const claimTx = await sipContract.claimTokens();
+      await claimTx.wait();
+
+      // Refresh sSPY balance
+      const spyContract = new ethers.Contract(SPY_ADDRESS, TOKEN_ABI, provider);
+      const newBalance = await spyContract.balanceOf(account);
+      const formattedBalance = parseFloat(ethers.formatEther(newBalance));
+
+      setSpyBalance(formattedBalance);
+
+      const currentDate = new Date();
+      const dateString = currentDate.toLocaleDateString();
+      setSspyBalanceData((prevData) => {
+        const existingEntryIndex = prevData.findIndex(entry => 
+          entry.time === dateString
+        );
+  
+        // Fix 3: Create a NEW array reference to force re-render
+        const newData = [...prevData];
+        
+        if (existingEntryIndex !== -1) {
+          // Update existing entry
+          newData[existingEntryIndex] = {
+            time: dateString,
+            balance: formattedBalance
+          };
+        } else {
+          // Add new entry
+          newData.push({
+            time: dateString,
+            balance: formattedBalance
+          });
+        }
+  
+        // Fix 4: Sort by actual Date objects, not strings
+        return newData.sort((a, b) => new Date(a.time) - new Date(b.time));
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Claim failed');
-      }
-
-      const data = await response.json();
-      alert(data.status === 'success' 
-        ? "Tokens claimed successfully!" 
-        : `Failed: ${data.message}`);
-
-      // Refresh balances after claim
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const spyContract = new ethers.Contract(SPY_ADDRESS, TOKEN_ABI, provider);
-      const spyBalance = await spyContract.balanceOf(account);
-      setSpyBalance(parseFloat(ethers.formatEther(spyBalance)));
+      alert("Tokens claimed successfully!");
+      await fetchBalances(provider, account);
 
     } catch (error) {
       console.error("Claim Error:", error);
-      alert(error.message || "Claim failed");
+      alert(error.reason || error.message || "Claim failed");
     } finally {
       setIsClaiming(false);
     }
@@ -203,7 +258,7 @@ export default function Home() {
    <div className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-800 p-8">
       <div className="max-w-7xl mx-auto">
         <h1 className="text-5xl font-bold text-center mb-12 bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
-          Crypto Investment Dashboard
+          Stable SPY SIP Investment Dashboard
         </h1>
 
         {!account ? (
@@ -219,6 +274,7 @@ export default function Home() {
           <>
             {/* Charts Section */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-12">
+
               <div className="bg-gray-800 p-6 rounded-3xl shadow-2xl">
                 <h3 className="text-xl font-semibold mb-4 text-white">Ethereum Price (USD)</h3>
                 <div className="h-64">
@@ -243,29 +299,45 @@ export default function Home() {
                 </div>
               </div>
 
-              <div className="bg-gray-800 p-6 rounded-3xl shadow-2xl">
-                <h3 className="text-xl font-semibold mb-4 text-white">sSPY Balance History</h3>
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={sspyBalanceData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                      <XAxis dataKey="time" stroke="#9CA3AF" />
-                      <YAxis stroke="#9CA3AF" />
-                      <Tooltip
-                        contentStyle={{ backgroundColor: '#1F2937', border: 'none' }}
-                        itemStyle={{ color: '#E5E7EB' }}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="balance"
-                        stroke="#10b981"
-                        strokeWidth={2}
-                        dot={false}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
+            <div className="bg-gray-800 p-6 rounded-3xl shadow-2xl">
+            <h3 className="text-xl font-semibold mb-4 text-white">sSPY Balance History</h3>
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%" key={sspyBalanceData.length} // Add this key prop
+              >
+                <LineChart data={sspyBalanceData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis 
+                    dataKey="time" 
+                    stroke="#9CA3AF"
+                    tickFormatter={(time) => {
+                      const date = new Date(time);
+                      return `${date.getMonth()+1}/${date.getDate()}`;
+                    }}
+                  />
+                  <YAxis 
+                    stroke="#9CA3AF"
+                    domain={['auto', 'auto']}
+                    tickFormatter={(value) => new Intl.NumberFormat('en-US', {
+                      notation: value > 10000 ? 'compact' : 'standard'
+                    }).format(value)}
+                  />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#1F2937', border: 'none' }}
+                    itemStyle={{ color: '#E5E7EB' }}
+                    formatter={(value) => [Number(value).toFixed(4), 'Balance']}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="balance"
+                    stroke="#10b981"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
             </div>
 
             {/* Wallet Info */}
@@ -291,65 +363,51 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Action Section */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              <div className="bg-gray-800 p-8 rounded-3xl shadow-2xl">
-                <h3 className="text-xl font-bold mb-6 text-white">Subscribe</h3>
-                <div className="space-y-6">
-                  <div>
-                    <label className="block text-sm text-gray-400 mb-2">USDC Amount</label>
-                    <input
-                      type="number"
-                      value={investmentAmount}
-                      onChange={(e) => setInvestmentAmount(e.target.value)}
-                      className="w-full p-4 bg-gray-700 rounded-xl text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                      placeholder="Enter amount"
-                    />
+          {/* Action Section */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+            <div className="bg-gray-800 p-8 rounded-3xl shadow-2xl">
+              <h3 className="text-xl font-bold mb-6 text-white">Subscribe</h3>
+              {isSubscribed ? (
+                  <p className="text-green-400 text-lg font-semibold">You are already subscribed to the SIP!</p>
+                ) : (
+                  <div className="space-y-6">
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-2">USDC Amount</label>
+                      <input
+                        type="number"
+                        value={investmentAmount}
+                        onChange={(e) => setInvestmentAmount(e.target.value)}
+                        className="w-full p-4 bg-gray-700 rounded-xl text-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        placeholder="Enter amount"
+                      />
+                    </div>
+                    <button
+                      onClick={handleSubscribe}
+                      className="w-full bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white py-4 px-6 rounded-xl font-semibold transition-all duration-300"
+                      disabled={isSubscribing}
+                    >
+                      {isSubscribing ? "Processing..." : "Subscribe"}
+                    </button>
                   </div>
-                  <div>
-                    <label className="block text-sm text-gray-400 mb-2">Private Key</label>
-                    <input
-                      type="password"
-                      value={privateKey}
-                      onChange={(e) => setPrivateKey(e.target.value)}
-                      className="w-full p-4 bg-gray-700 rounded-xl text-red-400 focus:ring-2 focus:ring-red-500 focus:outline-none"
-                      placeholder="Enter private key"
-                    />
-                  </div>
-                  <button
-                    onClick={handleSubscribe}
-                    className="w-full bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white py-4 px-6 rounded-xl font-semibold transition-all duration-300"
-                    disabled={isSubscribing}
-                  >
-                    {isSubscribing ? 'Processing...' : 'Subscribe'}
-                  </button>
-                </div>
+                )}
+            </div>
+
+            <div className="bg-gray-800 p-8 rounded-3xl shadow-2xl">
+              <h3 className="text-xl font-bold mb-6 text-white">Claim Tokens</h3>
+              <div className="space-y-6">
+                <button
+                  onClick={handleClaim}
+                  className="w-full bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-700 hover:to-purple-600 text-white py-4 px-6 rounded-xl font-semibold transition-all duration-300"
+                  disabled={isClaiming}
+                >
+                  {isClaiming ? 'Claiming...' : 'Claim sSPY Tokens'}
+                </button>
+              </div>
               </div>
 
-              <div className="bg-gray-800 p-8 rounded-3xl shadow-2xl">
-                <h3 className="text-xl font-bold mb-6 text-white">Claim Tokens</h3>
-                <div className="space-y-6">
-                  <div>
-                    <label className="block text-sm text-gray-400 mb-2">Private Key</label>
-                    <input
-                      type="password"
-                      value={privateKey}
-                      onChange={(e) => setPrivateKey(e.target.value)}
-                      className="w-full p-4 bg-gray-700 rounded-xl text-purple-400 focus:ring-2 focus:ring-purple-500 focus:outline-none"
-                      placeholder="Enter private key"
-                    />
-                  </div>
-                  <button
-                    onClick={handleClaim}
-                    className="w-full bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-700 hover:to-purple-600 text-white py-4 px-6 rounded-xl font-semibold transition-all duration-300"
-                    disabled={isClaiming}
-                  >
-                    {isClaiming ? 'Claiming...' : 'Claim sSPY Tokens'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </>
+          </div>
+        </>
         )}
       </div>
     </div>
