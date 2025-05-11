@@ -6,3 +6,4 @@ build/
 reports/
 venv/
 venvl/
+.pytest_cache/
