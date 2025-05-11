@@ -14,8 +14,8 @@ def test_live_contracts():
     print("✅ Subscribed successfully")
 
     # 2. Fast forward time (Ganache local only) — not usable on Sepolia
-    # chain.sleep(30 * 24 * 60 * 60)
-    # chain.mine()
+    chain.sleep(30 * 24 * 60 * 60)
+    chain.mine()
 
     # 3. Try claiming tokens
     tx2 = sip.claimTokens({"from": account})

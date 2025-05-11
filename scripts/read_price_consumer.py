@@ -1,10 +1,10 @@
-from brownie import SPYPriceConsumer, Contract, accounts
+from brownie import SPYPriceConsumer, Contract, accounts, config
 
 def read_price():
-    account = accounts[0]
+    account = accounts.add(config["wallets"]["from_key"])
     
     # Connect manually
-    consumer_address = "0xe4328B520c7327600eA9c37f74df955803b53dc5"
+    consumer_address = 0x4B5Ea1f604cB8C59B48ca9353EE8b538696E0bC7
     consumer = Contract.from_abi("SPYPriceConsumer", consumer_address, SPYPriceConsumer.abi)
 
     latest_price = consumer.getLatestPrice({"from": account})
