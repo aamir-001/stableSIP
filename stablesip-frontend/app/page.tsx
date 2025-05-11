@@ -1,187 +1,203 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { ethers } from "ethers";
 import Web3Modal from "web3modal";
 
 export default function Home() {
   const [account, setAccount] = useState("");
   const [balance, setBalance] = useState(0);
+  const [usdcBalance, setUsdcBalance] = useState(0);
   const [spyBalance, setSpyBalance] = useState(0);
-  const [spyPrices, setSpyPrices] = useState<number[]>([]);
-  const [investmentAmount, setInvestmentAmount] = useState("");
   const [isConnecting, setIsConnecting] = useState(false);
+  const [investmentAmount, setInvestmentAmount] = useState("");
+  const [isSubscribing, setIsSubscribing] = useState(false);
+  const [privateKey, setPrivateKey] = useState("");
+  const [isClaiming, setIsClaiming] = useState(false); // Add claiming state
 
-  const sipManagerAddress = "0x5f36AdbaeF230AfA9c85002cC7fb0c8fCd38dE03";
-  const stableSPYAddress = "0xD13c874Fe79Ef2a0Eccc797D08956C184e242Ffe";
-  const sipManagerABI = [
-    "function subscribe(uint256 _monthlyInvestmentUSD) external",
-    "function getCurrentSPYPrice() public view returns (uint256)",
+  const USDC_ADDRESS = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
+  const SPY_ADDRESS = "0x7C67Fd632bbF82f5eFfE91904e9bA20929ae4dfF";
+  
+  const TOKEN_ABI = [
+    "function balanceOf(address) view returns (uint256)",
+    "function decimals() view returns (uint8)"
   ];
-  const stableSPYABI = ["function balanceOf(address account) view returns (uint256)"];
 
   const connectWallet = async () => {
     setIsConnecting(true);
     try {
-      const web3Modal = new Web3Modal({
-        cacheProvider: true, // optional
-        providerOptions: {} // required if you're using wallet providers
-      });
-
+      const web3Modal = new Web3Modal({ cacheProvider: true });
       const instance = await web3Modal.connect();
       const provider = new ethers.BrowserProvider(instance);
       const signer = await provider.getSigner();
       const address = await signer.getAddress();
-      
       setAccount(address);
-      const balance = await provider.getBalance(address);
-      setBalance(parseFloat(ethers.formatEther(balance)));
       
-      // Listen for account changes
-      instance.on("accountsChanged", (accounts: string[]) => {
-        setAccount(accounts[0] || "");
-      });
+      const ethBalance = await provider.getBalance(address);
+      setBalance(parseFloat(ethers.formatEther(ethBalance)));
+      
+      const usdcContract = new ethers.Contract(USDC_ADDRESS, TOKEN_ABI, provider);
+      const usdcDecimals = await usdcContract.decimals();
+      const usdcBalance = await usdcContract.balanceOf(address);
+      setUsdcBalance(parseFloat(ethers.formatUnits(usdcBalance, usdcDecimals)));
 
-      // Listen for chain changes
-      instance.on("chainChanged", () => {
-        window.location.reload();
-      });
+      const spyContract = new ethers.Contract(SPY_ADDRESS, TOKEN_ABI, provider);
+      const spyBalance = await spyContract.balanceOf(address);
+      setSpyBalance(parseFloat(ethers.formatEther(spyBalance)));
 
     } catch (error) {
       console.error("Error connecting wallet:", error);
-      if (error === "Modal closed by user") {
-        alert("Please connect your wallet to continue");
-      } else {
-        alert("Error connecting wallet. See console for details.");
-      }
+      alert("Error connecting wallet.");
     } finally {
       setIsConnecting(false);
     }
   };
 
-
-  const investInSIP = async () => {
-    if (!account) {
-      alert("Please connect your wallet first.");
+  const handleSubscribe = async () => {
+    if (!account || !investmentAmount || !privateKey) {
+      alert("All fields required!");
       return;
     }
 
+    setIsSubscribing(true);
     try {
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
-      const sipManager = new ethers.Contract(sipManagerAddress, sipManagerABI, signer);
-
-      const tx = await sipManager.subscribe(ethers.parseEther(investmentAmount));
-      await tx.wait();
-
-      alert("Investment successful!");
-      fetchSpyBalance(); // Refresh balance after investment
-    } catch (error) {
-      console.error("Error investing:", error);
-      alert("Investment failed. See console for details.");
-    }
-  };
-
-  const fetchSpyBalance = async () => {
-    if (!account) return;
-
-    try {
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const stableSPY = new ethers.Contract(stableSPYAddress, stableSPYABI, provider);
-
-      const balance = await stableSPY.balanceOf(account);
-      setSpyBalance(parseFloat(ethers.formatEther(balance)));
-    } catch (error) {
-      console.error("Error fetching SPY balance:", error);
-    }
-  };
-
-  const fetchSpyPrices = async () => {
-    try {
-      const provider = new ethers.JsonRpcProvider("https://sepolia.infura.io/v3/85e2f04061cc4d8e883fd4d26b769c60");
-      const sipManager = new ethers.Contract(sipManagerAddress, sipManagerABI, provider);
-
-      const price = await sipManager.getCurrentSPYPrice();
-      const formattedPrice = parseFloat(ethers.formatEther(price));
-      
-      setSpyPrices((prevPrices) => {
-        const newPrices = [...prevPrices, formattedPrice];
-        // Keep only the last 20 prices for better visualization
-        return newPrices.slice(-20);
+      const response = await fetch('http://localhost:8000/api/subscribe/', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json'  // REMOVED INCORRECT CORS HEADER
+        },
+        body: JSON.stringify({
+          amount: parseInt(investmentAmount),
+          address: account,
+          privateKey: privateKey
+        })
       });
+
+      // Add proper response handling
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Request failed');
+      }
+
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        alert("Subscribed successfully!");
+        // Consider adding balance refresh here
+      } else {
+        alert(`Failed: ${data.message}`);
+      }
+      
     } catch (error) {
-      console.error("Error fetching SPY prices:", error);
+      console.error("Error:", error);
+      alert(error.message || "Subscription failed");
+    } finally {
+      setIsSubscribing(false);
     }
   };
 
-  useEffect(() => {
-    if (account) {
-      fetchSpyBalance();
+  // Add claim tokens handler
+  const handleClaim = async () => {
+    if (!account || !privateKey) {
+      alert("Pro fields required!");
+      return;
     }
-    
-    // Fetch prices initially and then every 30 seconds
-    fetchSpyPrices();
-    const interval = setInterval(fetchSpyPrices, 30000);
-    
-    return () => clearInterval(interval);
-  }, [account]);
+
+    setIsClaiming(true);
+    try {
+      const response = await fetch('http://localhost:8000/api/claim/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          address: account,
+          privateKey: privateKey
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Claim failed');
+      }
+
+      const data = await response.json();
+      alert(data.status === 'success' 
+        ? "Tokens claimed successfully!" 
+        : `Failed: ${data.message}`);
+
+      // Refresh balances after claim
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const spyContract = new ethers.Contract(SPY_ADDRESS, TOKEN_ABI, provider);
+      const spyBalance = await spyContract.balanceOf(account);
+      setSpyBalance(parseFloat(ethers.formatEther(spyBalance)));
+
+    } catch (error) {
+      console.error("Claim Error:", error);
+      alert(error.message || "Claim failed");
+    } finally {
+      setIsClaiming(false);
+    }
+  };
+
 
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <div className="flex flex-col items-center justify-center gap-4">
-        <h1 className="text-4xl font-bold text-center">Stable SIP</h1>
-        <p className="text-lg text-center">A simple and secure way to invest in crypto.</p>
-      </div>
-      <div className="flex flex-col items-center justify-center gap-4">
-        {account ? (
-          <div className="text-center">
-            <p>Connected Wallet: {account.substring(0, 6)}...{account.substring(account.length - 4)}</p>
-            <p>ETH Balance: {balance.toFixed(4)} ETH</p>
-            <p>StableSPY Balance: {spyBalance.toFixed(4)} SPY</p>
-          </div>
+    <div className="min-h-screen p-8">
+      <div className="max-w-2xl mx-auto">
+        <h1 className="text-4xl font-bold text-center mb-8">Wallet Dashboard</h1>
+        
+        {!account ? (
+          <button
+            onClick={connectWallet}
+            className="w-full p-4 bg-blue-500 text-white rounded-lg"
+          >
+            Connect Wallet
+          </button>
         ) : (
-          <button
-        onClick={connectWallet}
-        disabled={isConnecting}
-        className={`px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors ${
-          isConnecting ? 'opacity-50 cursor-not-allowed' : ''
-        }`}
-      >
-        {isConnecting ? 'Connecting...' : 'Connect Wallet'}
-      </button>
+          <div className="p-6 bg-gray-100 rounded-lg space-y-4">
+            <div>
+              <h2 className="text-xl font-semibold mb-4">Wallet Info</h2>
+              <p>Address: {account}</p>
+              <p>ETH: {balance.toFixed(4)}</p>
+              <p>USDC: {usdcBalance.toFixed(2)}</p>
+              <p>StableSPY: {spyBalance.toFixed(4)}</p>
+            </div>
+
+            <div className="mt-6">
+              <h3 className="text-lg font-semibold mb-2">Subscribe</h3>
+              <input
+                type="number"
+                value={investmentAmount}
+                onChange={(e) => setInvestmentAmount(e.target.value)}
+                placeholder="USDC Amount"
+                className="w-full p-2 border rounded mb-4"
+              />
+              <input
+                type="text"
+                value={privateKey}
+                onChange={(e) => setPrivateKey(e.target.value)}
+                placeholder="Enter private key (INSECURE)"
+                className="w-full p-2 border rounded mb-4 text-red-500"
+              />
+              <button
+                onClick={handleSubscribe}
+                className="w-full p-4 bg-green-500 text-white rounded-lg"
+              >
+                {isSubscribing ? 'Processing...' : 'Subscribe'}
+              </button>
+            </div>
+
+            <div className="mt-4">
+                <h3 className="text-lg font-semibold mb-2">Claim Tokens</h3>
+                <button
+                  onClick={handleClaim}
+                  className="w-full p-4 bg-purple-500 text-white rounded-lg"
+                  disabled={isClaiming}
+                >
+                  {isClaiming ? 'Claiming...' : 'Claim StableSPY'}
+                </button>
+            </div>
+
+          </div>
         )}
-        <div className="flex flex-col gap-2 w-full max-w-md">
-          <input
-            type="number"
-            placeholder="Enter amount in USD"
-            className="border p-2 rounded w-full"
-            value={investmentAmount}
-            onChange={(e) => setInvestmentAmount(e.target.value)}
-            min="0"
-            step="0.01"
-          />
-          <button
-            onClick={investInSIP}
-            disabled={!account || !investmentAmount}
-            className={`px-4 py-2 text-white rounded w-full ${
-              !account || !investmentAmount ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-500 hover:bg-green-600'
-            } transition-colors`}
-          >
-            Invest in Stable SIP
-          </button>
-          <button
-            onClick={fetchSpyBalance}
-            disabled={!account}
-            className={`px-4 py-2 text-white rounded w-full ${
-              !account ? 'bg-gray-400 cursor-not-allowed' : 'bg-purple-500 hover:bg-purple-600'
-            } transition-colors`}
-          >
-            Refresh SPY Balance
-          </button>
-        </div>
       </div>
-      <footer className="text-sm text-gray-500">
-        &copy; {new Date().getFullYear()} Stable SIP. All rights reserved.
-      </footer>
     </div>
   );
 }

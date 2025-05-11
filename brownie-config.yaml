@@ -6,7 +6,7 @@ compiler:
     version: 0.8.26  # explicitly set Solidity version
     remappings:
       - "@openzeppelin=OpenZeppelin/openzeppelin-contracts@4.8.0"
-
+dotenv: .env
 networks:
   development:
     host: http://127.0.0.1:8545
@@ -14,6 +14,9 @@ networks:
   newsepolia:
     host: https://sepolia.infura.io/v3/85e2f04061cc4d8e883fd4d26b769c60
     chainid: 11155111
+    verify: False
+    # explorer: https://api-sepolia.etherscan.io/api
+    # etherscan_token: ${ETHERSCAN_API_KEY}
 
 wallets:
   from_key: ${PRIVATE_KEY}
